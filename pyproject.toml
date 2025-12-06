@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smartsearch"
+version = "0.1.0"
+description = "SmartKNN vector search engine V1"
+authors = [
+    {name = "Jashu", email = "your_email@example.com"}
+]
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["numpy", "numba"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -44,14 +44,13 @@ def smart_search(
     if coarse_ids is None or coarse_ids.size == 0:
         return np.empty((0, 2), dtype=np.float32)
 
-
     ordered_ids = []
     for c in coarse_ids:
         fine_ids = clustering_index.search_fine(q, coarse_id=c, topF=topF)
         if fine_ids is None or len(fine_ids) == 0:
             continue
 
-        postings = clustering_index.postings_l1[c] 
+        postings = clustering_index.postings_l1[c]
         if postings is None:
             continue
 
@@ -66,14 +65,13 @@ def smart_search(
     if len(ordered_ids) == 0:
         return np.empty((0, 2), dtype=np.float32)
 
-    seen = set()
-    dedup_ids = []
-    for gid in ordered_ids:
-        if gid not in seen:
-            seen.add(gid)
-            dedup_ids.append(gid)
+  
+    ordered_ids_np = np.asarray(ordered_ids, dtype=np.int64)
+    _, first_pos = np.unique(ordered_ids_np, return_index=True)
+    dedup_ids = ordered_ids_np[np.sort(first_pos)]
+  
 
-    ids = np.asarray(dedup_ids, dtype=np.int64)
+    ids = dedup_ids
     vectors = master_vectors[ids]
 
     if weights is None:

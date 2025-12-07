@@ -5,12 +5,13 @@ from multiprocessing import shared_memory
 from smart_search import smart_search
 
 
-
 def _sanitize_vectors(vectors: np.ndarray) -> np.ndarray:
     mask = np.isfinite(vectors).all(axis=1)
     if not np.all(mask):
         print(f"[SmartSearch WARN] {np.sum(~mask)} vectors contain NaN/Inf → masked")
-    return vectors * mask[:, None]
+    out = vectors.copy()
+    out[~mask] = 0.0
+    return out
 
 
 def _fits_in_ram(num_bytes: int) -> bool:
@@ -18,7 +19,6 @@ def _fits_in_ram(num_bytes: int) -> bool:
         import psutil
         return num_bytes < psutil.virtual_memory().available * 0.6
     except Exception:
-       
         return True
 
 
@@ -48,7 +48,6 @@ def _smart_search_worker(
     for i_local, i_global in enumerate(range(start, end)):
         q = queries[i_global]
 
-       
         if not np.all(np.isfinite(q)):
             out[i_local] = np.empty((0, 2), dtype=np.float32)
             continue
@@ -64,7 +63,6 @@ def _smart_search_worker(
     shm_q.close()
     shm_v.close()
     return start, out
-
 
 
 def smart_search_batch_parallel(
@@ -88,7 +86,6 @@ def smart_search_batch_parallel(
         )
 
     master_vectors = _sanitize_vectors(master_vectors)
-
 
     if queries_lowdim.dtype != np.float32 or master_vectors.dtype != np.float32:
         print("[SmartSearch WARN] Casting inputs to float32")
@@ -145,9 +142,13 @@ def smart_search_batch_parallel(
                 results[start_idx : start_idx + len(batch_res)] = batch_res
 
     finally:
-        try: shm_q.close(); shm_q.unlink()
-        except: pass
-        try: shm_v.close(); shm_v.unlink()
-        except: pass
+        try:
+            shm_q.close(); shm_q.unlink()
+        except:
+            pass
+        try:
+            shm_v.close(); shm_v.unlink()
+        except:
+            pass
 
     return results

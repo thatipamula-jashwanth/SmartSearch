@@ -30,7 +30,6 @@ def smart_search(
         return np.empty((0, 2), dtype=np.float32)
     q = q / q_norm
 
-  
     if not _warmed_up:
         dummy = np.zeros((1, dim), dtype=np.float32)
         try:
@@ -41,31 +40,32 @@ def smart_search(
         finally:
             _warmed_up = True
 
-
     coarse_ids = clustering_index.search_centroids(q, topC=topC)
     if coarse_ids is None or coarse_ids.size == 0:
         return np.empty((0, 2), dtype=np.float32)
 
-    
+
     ordered_ids = []
     for c in coarse_ids:
         fine_ids = clustering_index.search_fine(q, coarse_id=c, topF=topF)
         if fine_ids is None or len(fine_ids) == 0:
             continue
 
-        postings = clustering_index.postings_l1.get(c)
+        postings = clustering_index.postings_l1[c] 
         if postings is None:
             continue
 
         for f in fine_ids:
-            ids = postings.get(f)
-            if ids:
+            if f < 0 or f >= len(postings):
+                continue
+
+            ids = postings[f]
+            if ids is not None and len(ids) > 0:
                 ordered_ids.extend(ids)
 
     if len(ordered_ids) == 0:
         return np.empty((0, 2), dtype=np.float32)
 
-    
     seen = set()
     dedup_ids = []
     for gid in ordered_ids:
@@ -76,17 +76,18 @@ def smart_search(
     ids = np.asarray(dedup_ids, dtype=np.int64)
     vectors = master_vectors[ids]
 
-    
     if weights is None:
         scores = compute_cosine_scores(q, vectors)
     else:
         if not np.all(np.isfinite(weights)) or np.any(weights < 0):
             raise ValueError("[smart_search] Invalid weights (NaN/Inf/negative)")
+        if weights.shape[0] != dim:
+            raise ValueError("[smart_search] Weight dimension mismatch query")
         if not np.any(weights):
             return np.empty((0, 2), dtype=np.float32)
+
         scores = compute_weighted_cosine_scores(q, vectors, weights)
 
-    
     k_eff = min(K, len(scores))
     idx = np.argpartition(scores, -k_eff)[-k_eff:]
     idx = idx[np.argsort(scores[idx])[::-1]]

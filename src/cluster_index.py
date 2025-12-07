@@ -13,112 +13,129 @@ class ClusteringIndex:
         self.n_fine = int(n_fine)
         self.batch_size = int(batch_size)
         self.seed = int(seed)
-        self.max_postings = max_postings  
+        self.max_postings = max_postings
 
         self.centroids_l0 = None
-        self.centroids_l1 = {}
-        self.postings_l1 = {}
+        self.centroids_l1 = [None] * self.n_coarse
+        self.postings_l1 = [None] * self.n_coarse
 
+   
     def build(self, routing_vectors):
         X = np.asarray(routing_vectors, dtype=np.float32)
         if X.ndim != 2:
-            raise ValueError("routing_vectors must be a 2-D array")
+            raise ValueError("routing_vectors must be 2-D")
+
         if np.isnan(X).any() or np.isinf(X).any():
-            raise ValueError("routing_vectors contains NaN / Inf")
+            raise ValueError("routing_vectors contains NaN/Inf values")
 
         N, D = X.shape
         if N < self.n_coarse:
-            raise ValueError(f"Dataset too small for requested n_coarse: N={N} < n_coarse={self.n_coarse}")
+            raise ValueError(f"Dataset too small: N={N}, but n_coarse={self.n_coarse}")
 
         norms = np.linalg.norm(X, axis=1, keepdims=True)
-        norms[norms < 1e-12] = 1.0 
+        norms = np.where(norms < 1e-12, 1.0, norms)
         X = X / norms
 
         if self.n_coarse * self.n_fine > 500_000:
             warnings.warn(
-                "n_coarse × n_fine is extremely large — memory usage may be high",
-                RuntimeWarning
+                "n_coarse × n_fine is very large — memory usage may be high.",
+                RuntimeWarning,
             )
 
-       
         k0 = MiniBatchKMeans(
             n_clusters=self.n_coarse,
             batch_size=self.batch_size,
-            random_state=self.seed
-            
+            random_state=self.seed,
+            n_init="auto"
         )
         labels0 = k0.fit_predict(X)
+
         C0 = k0.cluster_centers_.astype(np.float32)
-        C0 /= np.linalg.norm(C0, axis=1, keepdims=True) + 1e-12
+        C0 /= (np.linalg.norm(C0, axis=1, keepdims=True) + 1e-12)
         self.centroids_l0 = C0
 
-        
-        self.postings_l1 = {c: {} for c in range(self.n_coarse)}
+        clusters_L0 = {i: [] for i in range(self.n_coarse)}
+        for idx, cid in enumerate(labels0):
+            clusters_L0[cid].append(idx)
 
        
         for c in range(self.n_coarse):
-            ids = np.where(labels0 == c)[0]
+            ids = clusters_L0[c]
             if len(ids) == 0:
+              
+                self.centroids_l1[c] = None
+                self.postings_l1[c] = []
                 continue
 
             Xc = X[ids]
-            nf = min(self.n_fine, len(Xc))
 
-           
+            nf = min(self.n_fine, len(Xc))
             if nf == 1:
                 self.centroids_l1[c] = Xc.copy()
-                self.postings_l1[c][0] = ids.tolist()
+                self.postings_l1[c] = [np.asarray(ids, dtype=np.int32)]
                 continue
 
             k1 = MiniBatchKMeans(
                 n_clusters=nf,
                 batch_size=self.batch_size,
-                random_state=self.seed + c
-               
+                random_state=self.seed + c,
+                n_init="auto"
             )
             labels1 = k1.fit_predict(Xc)
+
             C1 = k1.cluster_centers_.astype(np.float32)
-            C1 /= np.linalg.norm(C1, axis=1, keepdims=True) + 1e-12
+            C1 /= (np.linalg.norm(C1, axis=1, keepdims=True) + 1e-12)
             self.centroids_l1[c] = C1
 
-            for f in range(nf):
-                mask = labels1 == f
-                posting_ids = ids[mask]
-                if self.max_postings is not None and len(posting_ids) > self.max_postings:
-                    posting_ids = posting_ids[:self.max_postings]
-                self.postings_l1[c][f] = posting_ids.tolist()
+            posting_lists = [[] for _ in range(nf)]
+            for i, f in enumerate(labels1):
+                posting_lists[f].append(ids[i])
+
+            final_postings = []
+            for p in posting_lists:
+                if self.max_postings is not None and len(p) > self.max_postings:
+                    p = p[:self.max_postings]
+                final_postings.append(np.asarray(p, dtype=np.int32))
+
+            self.postings_l1[c] = final_postings
 
         return self
 
-  
+
     def search_centroids(self, query, topC=4):
         if self.centroids_l0 is None:
-            raise RuntimeError("ClusteringIndex.build() must be called first")
+            raise RuntimeError("Index not built yet — call build() first.")
 
         q = np.asarray(query, dtype=np.float32)
         if q.ndim != 1:
-            raise ValueError("query must be 1-D")
+            raise ValueError("query must be 1-D vector")
+
         if np.isnan(q).any() or np.isinf(q).any():
             raise ValueError("query contains NaN/Inf")
 
-        q /= (np.linalg.norm(q) + 1e-12)
+        q_norm = np.linalg.norm(q) + 1e-12
+        qn = q / q_norm
 
-        sims = self.centroids_l0 @ q
+        sims = self.centroids_l0 @ qn
         k = min(topC, sims.shape[0])
+
         idx = np.argpartition(sims, -k)[-k:]
         return idx[np.argsort(sims[idx])[::-1]]
 
-    
     def search_fine(self, query, coarse_id, topF=2):
-        C1 = self.centroids_l1.get(coarse_id)
+        if coarse_id < 0 or coarse_id >= self.n_coarse:
+            return []
+
+        C1 = self.centroids_l1[coarse_id]
         if C1 is None or C1.size == 0:
             return []
 
         q = np.asarray(query, dtype=np.float32)
-        q /= np.linalg.norm(q) + 1e-12
+        q_norm = np.linalg.norm(q) + 1e-12
+        qn = q / q_norm
 
-        sims = C1 @ q
-
+        sims = C1 @ qn
         k = min(topF, sims.shape[0])
+
         idx = np.argpartition(sims, -k)[-k:]
         return idx[np.argsort(sims[idx])[::-1]]
